@@ -1,6 +1,8 @@
 """This module contains the ``SeleniumMiddleware`` scrapy middleware"""
-
+import os
+import zipfile
 from importlib import import_module
+from urllib.parse import urlparse
 
 from scrapy import signals
 from scrapy.exceptions import NotConfigured
@@ -14,7 +16,7 @@ class SeleniumMiddleware:
     """Scrapy middleware handling the requests using selenium"""
 
     def __init__(self, driver_name, driver_executable_path,
-        browser_executable_path, command_executor, driver_arguments):
+                 browser_executable_path, command_executor, driver_arguments):
         """Initialize the selenium webdriver
 
         Parameters
@@ -45,6 +47,9 @@ class SeleniumMiddleware:
             driver_options.binary_location = browser_executable_path
         for argument in driver_arguments:
             driver_options.add_argument(argument)
+        if os.getenv('PROXY_URL'):
+            self.proxy_auth_plugin()
+            driver_options.add_extension('proxy_auth_plugin.zip')
 
         driver_kwargs = {
             'executable_path': driver_executable_path,
@@ -64,6 +69,78 @@ class SeleniumMiddleware:
             capabilities = driver_options.to_capabilities()
             self.driver = webdriver.Remote(command_executor=command_executor,
                                            desired_capabilities=capabilities)
+
+    @staticmethod
+    def proxy_config():
+        proxy_url = os.getenv('PROXY_URL')
+
+        # 使用urlparse解析代理URL
+        parsed_url = urlparse(proxy_url)
+
+        # 从解析后的结果中提取用户名、密码、主机名和端口号
+        username = parsed_url.username
+        password = parsed_url.password
+        host = parsed_url.hostname
+        port = parsed_url.port
+        return host, port, username, password
+
+    def proxy_auth_plugin(self):
+        manifest_json = """
+        {
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Chrome Proxy",
+            "permissions": [
+                "proxy",
+                "tabs",
+                "unlimitedStorage",
+                "storage",
+                "<all_urls>",
+                "webRequest",
+                "webRequestBlocking"
+            ],
+            "background": {
+                "scripts": ["background.js"]
+            },
+            "minimum_chrome_version":"22.0.0"
+        }
+        """
+
+        background_js = """
+        var config = {
+                mode: "fixed_servers",
+                rules: {
+                  singleProxy: {
+                    scheme: "http",
+                    host: "%s",
+                    port: parseInt(%s)
+                  },
+                  bypassList: ["localhost"]
+                }
+              };
+
+        chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+
+        function callbackFn(details) {
+            return {
+                authCredentials: {
+                    username: "%s",
+                    password: "%s"
+                }
+            };
+        }
+
+        chrome.webRequest.onAuthRequired.addListener(
+                    callbackFn,
+                    {urls: ["<all_urls>"]},
+                    ['blocking']
+        );
+        """ % self.proxy_config()
+
+        # 使用 'w' 模式创建ZIP文件，指定ZIP_DEFLATED来压缩内容
+        with zipfile.ZipFile('proxy_auth_plugin.zip', 'w', zipfile.ZIP_DEFLATED) as zp:
+            zp.writestr('manifest.json', manifest_json)
+            zp.writestr('background.js', background_js)
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -137,4 +214,3 @@ class SeleniumMiddleware:
         """Shutdown the driver when spider is closed"""
 
         self.driver.quit()
-
